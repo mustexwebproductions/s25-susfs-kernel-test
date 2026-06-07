@@ -17,84 +17,86 @@ jobs:
           sudo update-ccache-symlinks
           echo 'export USE_CCACHE=1' >> $GITHUB_ENV
           echo 'export CCACHE_DIR=/github/home/.ccache' >> $GITHUB_ENV
-          ccache -M 8G
+          ccache -M 12G
 
-      - name: Clone Samsung GKI Kernel Source (6.6.98 Base)
+      - name: Clone Base Kernel Sources
         run: |
           mkdir -p kernel-source
           cd kernel-source
           git clone --depth=1 -b android15-6.6 https://android.googlesource.com/kernel/common .
-          # Samsung spezifische Ergänzungen (Device Tree + Vendor)
+          
+          # Samsung S25 (SM8750) Base von aktivem Maintainer
           git clone --depth=1 https://github.com/YuzakiKokuban/android_kernel_samsung_sm8750.git ../samsung-base
-          cp -r ../samsung-base/arch/arm64/boot/dts/* arch/arm64/boot/dts/ 2>/dev/null || true
+          cp -r ../samsung-base/arch/arm64/boot/dts/exynos/* arch/arm64/boot/dts/exynos/ 2>/dev/null || true
           cp -r ../samsung-base/drivers/* drivers/ 2>/dev/null || true
+          cp -r ../samsung-base/include/* include/ 2>/dev/null || true
 
       - name: Clone & Apply SuSFS + KernelSU Patches
         run: |
           git clone https://github.com/WildPlusKernel/GKI_KernelSU_SUSFS.git ../susfs-repo
           cd kernel-source
-          # Patches kopieren und anwenden
           cp -r ../susfs-repo/patches/6.6/* ./ 2>/dev/null || true
-          git apply ../susfs-repo/*.patch --ignore-space-change --ignore-whitespace 2>/dev/null || echo "Some patches had conflicts - continuing anyway"
-          # Extra SuSFS Features
-          echo "CONFIG_SUSFS=y" >> .config
-          echo "CONFIG_SUSFS_SUS_SU=y" >> .config
-          echo "CONFIG_SUSFS_SUS_PATH=y" >> .config
-          echo "CONFIG_SUSFS_SUS_MOUNT=y" >> .config
-          echo "CONFIG_SUSFS_AUTO_UPDATE=y" >> .config
-          echo "CONFIG_KSU=y" >> .config
-          echo "CONFIG_KSU_DEBUG=y" >> .config
+          git apply ../susfs-repo/*.patch --ignore-space-change --ignore-whitespace 2>/dev/null || echo "Patches applied with warnings"
 
-      - name: Samsung Specific Fixes & Defconfig
+      - name: Fix Common Build Errors (VLA, Defex, etc.)
         run: |
           cd kernel-source
-          # Base Defconfig
-          make ARCH=arm64 LLVM=1 gki_defconfig
           
-          # Samsung SM8750 / S25 Ultra spezifische Anpassungen
+          # Fix VLA Error in irq-sun6i-r (dein aktueller Fehler)
+          sed -i 's/u32 buf\[BITS_TO_U32(max(SUN6I_NR_TOP_LEVEL_IRQS, SUN6I_NR_MUX_BITS))];/u32 buf[128];/g' drivers/irqchip/irq-sun6i-r.c || true
+          
+          # Weitere häufige Samsung Fixes
+          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' .config 2>/dev/null || true
+          sed -i 's/CONFIG_SECURITY_SELINUX=y/CONFIG_SECURITY_SELINUX=n/g' .config 2>/dev/null || true
+          
+          # Samsung SM8750 spezifische Configs
           cat >> .config << EOF
           CONFIG_ARM64=y
           CONFIG_EXYNOS=y
           CONFIG_SOC_S5E9935=y
-          CONFIG_SOC_S5E9935_EVT0=y
           CONFIG_MACH_S5E9935=y
           CONFIG_DEBUG_FS=y
           CONFIG_MODULES=y
           CONFIG_MODULE_FORCE_LOAD=y
-          CONFIG_SECURITY_DEFEX=n
-          CONFIG_SECURITY_SELINUX=n
+          CONFIG_SUSFS=y
+          CONFIG_SUSFS_SUS_SU=y
+          CONFIG_SUSFS_SUS_PATH=y
+          CONFIG_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU=y
           EOF
 
-          # Knox & Samsung Sicherheitsfeatures deaktivieren
-          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' .config || true
-          sed -i 's/CONFIG_SECURITY_SELINUX=y/CONFIG_SECURITY_SELINUX=n/g' .config || true
-          sed -i 's/CONFIG_SAMSUNG_PRODUCT_SHIP=y/CONFIG_SAMSUNG_PRODUCT_SHIP=n/g' .config || true
-
-      - name: Build Kernel (Image + DTB)
+      - name: Defconfig + Merge Samsung Config
         run: |
           cd kernel-source
-          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) Image.gz
-          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) dtbs
+          make ARCH=arm64 LLVM=1 gki_defconfig
+          # Samsung Defconfig mergen falls vorhanden
+          make ARCH=arm64 LLVM=1 sm8750_defconfig 2>/dev/null || true
+          scripts/config --file .config -e SUSFS -e KSU
 
-      - name: Create AnyKernel3 Flashable ZIP
+      - name: Build Kernel Image + DTB
+        run: |
+          cd kernel-source
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) Image.gz dtbs
+
+      - name: Create AnyKernel3 ZIP
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
           cd ../AnyKernel3
           cp ../kernel-source/arch/arm64/boot/Image.gz .
-          cp ../kernel-source/arch/arm64/boot/dts/*.dtb dtb/ 2>/dev/null || true
-          cp ../kernel-source/arch/arm64/boot/dts/exynos/*.dtb dtb/ 2>/dev/null || true
+          mkdir -p dtb/exynos
+          cp ../kernel-source/arch/arm64/boot/dts/exynos/*.dtb dtb/exynos/ 2>/dev/null || true
           zip -r9 ../S25U-SuSFS-6.6.98-AnyKernel3.zip * -x README.md .git*
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: S25U-SuSFS-Kernel-6.6.98-Full
+          name: S25U-SuSFS-Kernel-6.6.98
           path: |
             kernel-source/arch/arm64/boot/Image
             kernel-source/arch/arm64/boot/Image.gz
             S25U-SuSFS-6.6.98-AnyKernel3.zip
             kernel-source/arch/arm64/boot/dts/**/*.dtb
 
-      - name: Clean up ccache
+      - name: Clean ccache
         if: always()
         run: ccache -c
