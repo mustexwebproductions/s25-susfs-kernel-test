@@ -1,1 +1,100 @@
+name: Build S25 Ultra SuSFS Kernel (6.6.98)
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies + ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git libelf-dev libssl-dev libncurses-dev lz4 lzop make python3 python3-pip xz-utils zlib1g-dev clang llvm lld gcc-aarch64-linux-gnu g++-aarch64-linux-gnu repo
+          sudo update-ccache-symlinks
+          echo 'export USE_CCACHE=1' >> $GITHUB_ENV
+          echo 'export CCACHE_DIR=/github/home/.ccache' >> $GITHUB_ENV
+          ccache -M 8G
+
+      - name: Clone Samsung GKI Kernel Source (6.6.98 Base)
+        run: |
+          mkdir -p kernel-source
+          cd kernel-source
+          git clone --depth=1 -b android15-6.6 https://android.googlesource.com/kernel/common .
+          # Samsung spezifische Ergänzungen (Device Tree + Vendor)
+          git clone --depth=1 https://github.com/YuzakiKokuban/android_kernel_samsung_sm8750.git ../samsung-base
+          cp -r ../samsung-base/arch/arm64/boot/dts/* arch/arm64/boot/dts/ 2>/dev/null || true
+          cp -r ../samsung-base/drivers/* drivers/ 2>/dev/null || true
+
+      - name: Clone & Apply SuSFS + KernelSU Patches
+        run: |
+          git clone https://github.com/WildPlusKernel/GKI_KernelSU_SUSFS.git ../susfs-repo
+          cd kernel-source
+          # Patches kopieren und anwenden
+          cp -r ../susfs-repo/patches/6.6/* ./ 2>/dev/null || true
+          git apply ../susfs-repo/*.patch --ignore-space-change --ignore-whitespace 2>/dev/null || echo "Some patches had conflicts - continuing anyway"
+          # Extra SuSFS Features
+          echo "CONFIG_SUSFS=y" >> .config
+          echo "CONFIG_SUSFS_SUS_SU=y" >> .config
+          echo "CONFIG_SUSFS_SUS_PATH=y" >> .config
+          echo "CONFIG_SUSFS_SUS_MOUNT=y" >> .config
+          echo "CONFIG_SUSFS_AUTO_UPDATE=y" >> .config
+          echo "CONFIG_KSU=y" >> .config
+          echo "CONFIG_KSU_DEBUG=y" >> .config
+
+      - name: Samsung Specific Fixes & Defconfig
+        run: |
+          cd kernel-source
+          # Base Defconfig
+          make ARCH=arm64 LLVM=1 gki_defconfig
+          
+          # Samsung SM8750 / S25 Ultra spezifische Anpassungen
+          cat >> .config << EOF
+          CONFIG_ARM64=y
+          CONFIG_EXYNOS=y
+          CONFIG_SOC_S5E9935=y
+          CONFIG_SOC_S5E9935_EVT0=y
+          CONFIG_MACH_S5E9935=y
+          CONFIG_DEBUG_FS=y
+          CONFIG_MODULES=y
+          CONFIG_MODULE_FORCE_LOAD=y
+          CONFIG_SECURITY_DEFEX=n
+          CONFIG_SECURITY_SELINUX=n
+          EOF
+
+          # Knox & Samsung Sicherheitsfeatures deaktivieren
+          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' .config || true
+          sed -i 's/CONFIG_SECURITY_SELINUX=y/CONFIG_SECURITY_SELINUX=n/g' .config || true
+          sed -i 's/CONFIG_SAMSUNG_PRODUCT_SHIP=y/CONFIG_SAMSUNG_PRODUCT_SHIP=n/g' .config || true
+
+      - name: Build Kernel (Image + DTB)
+        run: |
+          cd kernel-source
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) Image.gz
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) dtbs
+
+      - name: Create AnyKernel3 Flashable ZIP
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
+          cd ../AnyKernel3
+          cp ../kernel-source/arch/arm64/boot/Image.gz .
+          cp ../kernel-source/arch/arm64/boot/dts/*.dtb dtb/ 2>/dev/null || true
+          cp ../kernel-source/arch/arm64/boot/dts/exynos/*.dtb dtb/ 2>/dev/null || true
+          zip -r9 ../S25U-SuSFS-6.6.98-AnyKernel3.zip * -x README.md .git*
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: S25U-SuSFS-Kernel-6.6.98-Full
+          path: |
+            kernel-source/arch/arm64/boot/Image
+            kernel-source/arch/arm64/boot/Image.gz
+            S25U-SuSFS-6.6.98-AnyKernel3.zip
+            kernel-source/arch/arm64/boot/dts/**/*.dtb
+
+      - name: Clean up ccache
+        if: always()
+        run: ccache -c
