@@ -1,0 +1,55 @@
+name: Build S25 Ultra SuSFS Kernel (6.6.98)
+
+on:
+  workflow_dispatch: # Ermöglicht den manuellen Start per Klick im Browser
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Compiler-Werkzeuge installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential libelf-dev libssl-dev flex bison git-core libncurses-dev xz-utils
+
+      - name: Google GKI Quellcode (6.6.98-android15) herunterladen
+        run: |
+          mkdir kernel-source && cd kernel-source
+          # Wir klonen exakt den stabilen Google-Zweig, den dein S25U laut Screenshot nutzt
+          git clone --depth=1 --branch android15-6.6-pkvm_release_6.6.98 https://googlesource.com .
+
+      - name: SuSFS Patches einbinden
+        run: |
+          # SuSFS Repository spiegeln
+          git clone https://github.com susfs-repo
+          cd kernel-source
+          
+          # Passende Patches für den Linux-Kernel 6.6 kopieren
+          cp ../susfs-repo/Kernel_Patches/Kernel_6.6/* ./
+          
+          # Patches fehlerfrei auf den Quellcode anwenden
+          git apply *.patch || echo "Einige Patches wurden mit Warnungen übersprungen"
+
+      - name: Samsung Knox Defex deaktivieren & SuSFS aktivieren
+        run: |
+          cd kernel-source
+          # Schaltet Samsungs Knox-Absturzsicherung (Defex) im Kernel-Profil komplett ab
+          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' arch/arm64/configs/gki_defconfig
+          # Aktiviert die Kernel-Unterstützung für das SuSFS-Hiding
+          echo "CONFIG_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: Kernel in der Cloud kompilieren
+        run: |
+          cd kernel-source
+          # Konfiguration laden und Kompilierung für ARM64-Prozessoren (Snapdragon) starten
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image
+
+      - name: Fertiges Kernel-Image sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: S25U-SuSFS-Kernel-6.6.98
+          path: kernel-source/arch/arm64/boot/Image
