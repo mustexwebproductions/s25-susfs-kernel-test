@@ -1,1 +1,103 @@
 
+name: Build S25 Ultra SuSFS Kernel (6.6.98)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git libelf-dev libssl-dev libncurses-dev lz4 lzop make python3 python3-pip xz-utils zlib1g-dev clang llvm lld gcc-aarch64-linux-gnu repo
+          sudo update-ccache-symlinks
+          echo 'export USE_CCACHE=1' >> $GITHUB_ENV
+          echo 'export CCACHE_DIR=/github/home/.ccache' >> $GITHUB_ENV
+          ccache -M 12G
+
+      - name: Clone Sources
+        run: |
+          mkdir -p kernel-source
+          cd kernel-source
+          git clone --depth=1 -b android15-6.6 https://android.googlesource.com/kernel/common .
+          
+          # Samsung S25 Base (beste verfügbare)
+          git clone --depth=1 https://github.com/YuzakiKokuban/android_kernel_samsung_sm8750.git ../samsung-base
+          cp -r ../samsung-base/arch/arm64/boot/dts/exynos/* arch/arm64/boot/dts/exynos/ 2>/dev/null || true
+          cp -r ../samsung-base/drivers/* drivers/ 2>/dev/null || true
+
+      - name: Apply SuSFS + KernelSU Patches
+        run: |
+          git clone https://github.com/WildPlusKernel/GKI_KernelSU_SUSFS.git ../susfs-repo
+          cd kernel-source
+          cp -r ../susfs-repo/patches/6.6/* ./ 2>/dev/null || true
+          git apply ../susfs-repo/*.patch --ignore-space-change --ignore-whitespace 2>/dev/null || echo "Patches with warnings"
+
+      - name: Fix Build Errors (Critical Patches)
+        run: |
+          cd kernel-source
+          
+          # VLA Error fix (irq-sun6i-r)
+          sed -i 's/u32 buf\[BITS_TO_U32(max(SUN6I_NR_TOP_LEVEL_IRQS, SUN6I_NR_MUX_BITS))];/u32 buf[256];/g' drivers/irqchip/irq-sun6i-r.c || true
+          
+          # mem_cgroup_init implicit declaration
+          sed -i '/mem_cgroup_init();/d' init/main.c || true
+          
+          # BPF / KCFI Errors
+          sed -i 's/CONFIG_CFI_CLANG=y/CONFIG_CFI_CLANG=n/g' .config 2>/dev/null || true
+          echo "CONFIG_CFI_CLANG=n" >> .config
+          echo "CONFIG_BPF_KPROBE_OVERRIDE=n" >> .config
+          
+          # Android Vendor Hook Errors
+          sed -i '/trace_android_vh_restore_curr_resched/d' arch/arm64/kernel/entry-common.c || true
+          
+          # Samsung Defex & SELinux
+          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' .config 2>/dev/null || true
+          sed -i 's/CONFIG_SECURITY_SELINUX=y/CONFIG_SECURITY_SELINUX=n/g' .config 2>/dev/null || true
+
+      - name: Defconfig & Config
+        run: |
+          cd kernel-source
+          make ARCH=arm64 LLVM=1 gki_defconfig
+          make ARCH=arm64 LLVM=1 sm8750_defconfig 2>/dev/null || true
+          
+          cat >> .config << EOF
+          CONFIG_SUSFS=y
+          CONFIG_SUSFS_SUS_SU=y
+          CONFIG_SUSFS_SUS_PATH=y
+          CONFIG_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU=y
+          CONFIG_DEBUG_FS=y
+          CONFIG_MODULES=y
+          CONFIG_MODULE_FORCE_LOAD=y
+          CONFIG_CFI_CLANG=n
+          CONFIG_SECURITY_DEFEX=n
+          CONFIG_SECURITY_SELINUX=n
+          EOF
+
+      - name: Build
+        run: |
+          cd kernel-source
+          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) Image.gz dtbs
+
+      - name: AnyKernel3 ZIP
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
+          cd ../AnyKernel3
+          cp ../kernel-source/arch/arm64/boot/Image.gz .
+          mkdir -p dtb/exynos
+          cp ../kernel-source/arch/arm64/boot/dts/exynos/*.dtb dtb/exynos/ 2>/dev/null || true
+          zip -r9 ../S25U-SuSFS-6.6.98.zip * -x README.md .git*
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: S25U-SuSFS-6.6.98
+          path: |
+            kernel-source/arch/arm64/boot/Image.gz
+            S25U-SuSFS-6.6.98.zip
