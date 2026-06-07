@@ -1,7 +1,7 @@
 name: Build S25 Ultra SuSFS Kernel (6.6.98)
 
 on:
-  workflow_dispatch: # Ermöglicht den manuellen Start per Klick im Browser
+  workflow_dispatch: # Ermöglicht den manuellen Start per Klick
 
 jobs:
   build-kernel:
@@ -10,46 +10,66 @@ jobs:
       - name: Code auschecken
         uses: actions/checkout@v4
 
-      - name: Compiler-Werkzeuge installieren
+      - name: Compiler-Werkzeuge und Repo-Tool installieren
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential libelf-dev libssl-dev flex bison git-core libncurses-dev xz-utils
+          sudo apt-get install -y bc build-essential libelf-dev libssl-dev flex bison git-core libncurses-dev xz-utils curl python3
+          # Google Repo-Tool installieren
+          mkdir -p ~/.bin
+          curl https://googleapis.com > ~/.bin/repo
+          chmod a+x ~/.bin/repo
+          export PATH=~/.bin:$PATH
 
-      - name: Google GKI Quellcode (6.6.98-android15) herunterladen
+      - name: Google GKI 6.6-android15 Manifest initialisieren und synchronisieren
         run: |
-          mkdir kernel-source && cd kernel-source
-          # Wir klonen exakt den stabilen Google-Zweig, den dein S25U laut Screenshot nutzt
-          git clone --depth=1 --branch android15-6.6-pkvm_release_6.6.98 https://googlesource.com .
+          export PATH=~/.bin:$PATH
+          mkdir kernel-workspace && cd kernel-workspace
+          
+          # Git Identität für das Repo-Tool setzen
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Wir initialisieren das offizielle GKI-Android15-6.6 Manifest
+          repo init -u https://googlesource.com -b android15-6.6
+          
+          # Wir holen uns exakt den Manifest-Stand für die Version 6.6.98
+          # Google nutzt hierfür feste Release-Tags im Manifest-Repo
+          cd .repo/manifests
+          git checkout refs/tags/android15-6.6-pkvm_release_6.6.98
+          cd ../..
+          
+          # Synchronisieren (Lädt Kernel + offizielle Google Clang-Compiler herunter)
+          # --current-branch und --depth=1 spart massiv Zeit und Speicherplatz
+          repo sync -c -j$(nproc) --no-tags --depth=1
 
       - name: SuSFS Patches einbinden
         run: |
-          # SuSFS Repository spiegeln
+          # SuSFS Repository holen
           git clone https://github.com susfs-repo
-          cd kernel-source
           
-          # Passende Patches für den Linux-Kernel 6.6 kopieren
-          cp ../susfs-repo/Kernel_Patches/Kernel_6.6/* ./
+          # In den frisch synchronisierten Kernel-Quelltext wechseln
+          cd kernel-workspace/common
           
-          # Patches fehlerfrei auf den Quellcode anwenden
-          git apply *.patch || echo "Einige Patches wurden mit Warnungen übersprungen"
+          # Passende Patches für den Linux-Kernel 6.6 kopieren und anwenden
+          cp ../../susfs-repo/Kernel_Patches/Kernel_6.6/* ./
+          git apply *.patch || echo "Einige Patches wurden mit Warnungen angewendet"
 
       - name: Samsung Knox Defex deaktivieren & SuSFS aktivieren
         run: |
-          cd kernel-source
-          # Schaltet Samsungs Knox-Absturzsicherung (Defex) im Kernel-Profil komplett ab
+          cd kernel-workspace/common
+          # Schaltet Samsungs Knox-Absturzsicherung (Defex) ab
           sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' arch/arm64/configs/gki_defconfig
-          # Aktiviert die Kernel-Unterstützung für das SuSFS-Hiding
+          # Aktiviert SuSFS in der Kernel-Konfiguration
           echo "CONFIG_SUSFS=y" >> arch/arm64/configs/gki_defconfig
 
-      - name: Kernel in der Cloud kompilieren
+      - name: Kernel mit Google Build-Skript kompilieren
         run: |
-          cd kernel-source
-          # Konfiguration laden und Kompilierung für ARM64-Prozessoren (Snapdragon) starten
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image
+          cd kernel-workspace
+          # Das offizielle Google-Skript baut den Kernel mit der korrekten Clang-Toolchain
+          LTO=thin ./build/build.sh
 
       - name: Fertiges Kernel-Image sichern
         uses: actions/upload-artifact@v4
         with:
           name: S25U-SuSFS-Kernel-6.6.98
-          path: kernel-source/arch/arm64/boot/Image
+          path: kernel-workspace/out/android15-6.6/dist/Image
