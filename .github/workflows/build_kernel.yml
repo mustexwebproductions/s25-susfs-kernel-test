@@ -1,110 +1,254 @@
-name: Build S25 Ultra SuSFS Kernel (6.6.98)
+name: Build Kernels
+
+permissions:
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Choose Release Type"
+        required: true
+        type: choice
+        options:
+          - Actions
+          - Pre-Release
+          - Release
+        default: Actions
+
+      ksun:
+        description: "Build with KSUN?"
+        required: false
+        default: true
+        type: boolean
+
+      susfs:
+        description: "Build with SUSFS?"
+        required: false
+        type: boolean
+        default: true
+
+      bbg:
+        description: "Build with BBG?"
+        required: false
+        type: boolean
+        default: true
+
+      zeromount:
+        description: "Add Zeromount?"
+        required: false
+        type: boolean
+        default: false
+        
+      unicodefix:
+        description: "Add unicode fix?"
+        required: false
+        type: boolean
+        default: true
+
+      droidspace:
+        description: "add droidspace support?"
+        required: false
+        type: boolean
+        default: true
+
+      ntsync:
+        description: "add ntsync?"
+        required: false
+        type: boolean
+        default: true
+
+      bbr:
+        description: "Add bbrv1?"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-22.04
+
+  build-samsung:
+    uses: ./.github/workflows/kernel-samsung.yml
+    secrets: inherit
+    with:
+      susfs: ${{ inputs.susfs }}
+      bbg: ${{ inputs.bbg }}
+      unicodefix: ${{ inputs.unicodefix }}
+      zeromount: ${{ inputs.zeromount }}
+      ksun: ${{ inputs.ksun }}
+      droidspace: ${{ inputs.droidspace }}
+      ntsync: ${{ inputs.ntsync }}
+      bbr: ${{ inputs.bbr }}
+
+  release:
+    runs-on: ubuntu-latest
+    if: inputs.release_type != 'Actions'
+    needs:
+      - build-samsung
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_NAME: "Samsung GKI Kernels With KSUN v3.2.0 & SUSFS v2.1.0"
+      RELEASE_BODY: ""
     steps:
-      - name: Checkout
+      - name: Free Disk Space
+        if: true
+        uses: endersonmenezes/free-disk-space@v3  # Use @main for latest, @v3 for stable
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"  # Use 'rmz' for faster deletion (default: 'rm')
+          rmz_version: "3.1.1"  # Required when rm_cmd is 'rmz'
+          testing: false
+      
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Generate New Tag
+        if: inputs.release_type != 'Actions'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git libelf-dev libssl-dev libncurses-dev lz4 lzop make python3 python3-pip xz-utils zlib1g-dev clang llvm lld gcc-aarch64-linux-gnu repo
-          sudo update-ccache-symlinks
-          echo 'export USE_CCACHE=1' >> $GITHUB_ENV
-          echo 'export CCACHE_DIR=/github/home/.ccache' >> $GITHUB_ENV
-          ccache -M 12G
+            LATEST_TAG=$(gh api repos/${{ github.repository }}/tags --jq '.[0].name' 2>/dev/null || echo "")
+            if [ -z "$LATEST_TAG" ]; then
+              LATEST_TAG="v2.1.0-r0"
+            fi
+            
+            NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
+    
+            echo "New tag: $NEW_TAG"
+            echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
 
-      - name: Clone Sources
-        run: |
-          mkdir -p kernel-source
-          cd kernel-source
-          git clone --depth=1 -b android15-6.6 https://android.googlesource.com/kernel/common .
-          
-          git clone --depth=1 https://github.com/YuzakiKokuban/android_kernel_samsung_sm8750.git ../samsung-base
-          cp -r ../samsung-base/arch/arm64/boot/dts/exynos/* arch/arm64/boot/dts/exynos/ 2>/dev/null || true
-          cp -r ../samsung-base/drivers/* drivers/ 2>/dev/null || true
-          cp -r ../samsung-base/include/* include/ 2>/dev/null || true
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./downloaded-artifacts
+          pattern: '*-AnyKernel3'
 
-      - name: Apply SuSFS + KernelSU
+      - name: Set release body
         run: |
-          git clone https://github.com/WildPlusKernel/GKI_KernelSU_SUSFS.git ../susfs-repo
-          cd kernel-source
-          cp -r ../susfs-repo/patches/6.6/* ./ 2>/dev/null || true
-          git apply ../susfs-repo/*.patch --ignore-space-change --ignore-whitespace 2>/dev/null || echo "Patches applied with warnings"
+          cat << 'EOF' > release_body.md
+      
+          **IMPORTANT DISCLAIMER**
+          This software is provided for testing and educational purposes only. Use at your own risk.
+          The developers are not responsible for any damage, data loss, or issues that may occur.
+          Please ensure you have proper backups before installation.
 
-      - name: Massive Fix Section (für deine aktuellen Errors)
-        run: |
-          cd kernel-source
-          
-          # VLA Fix
-          sed -i 's/u32 buf\[BITS_TO_U32(max(SUN6I_NR_TOP_LEVEL_IRQS, SUN6I_NR_MUX_BITS))];/u32 buf[256];/g' drivers/irqchip/irq-sun6i-r.c || true
-          
-          # mem_cgroup_init
-          sed -i '/mem_cgroup_init();/d' init/main.c || true
-          
-          # Android Vendor Hooks (trace_android_vh)
-          sed -i '/trace_android_vh_restore_curr_resched/d' arch/arm64/kernel/entry-common.c || true
-          
-          # BPF / KCFI Errors
-          sed -i 's/CONFIG_CFI_CLANG=y/CONFIG_CFI_CLANG=n/g' .config 2>/dev/null || true
-          echo "CONFIG_CFI_CLANG=n" >> .config
-          echo "CONFIG_BPF_KPROBE_OVERRIDE=n" >> .config
-          echo "CONFIG_BPF_JIT=n" >> .config 2>/dev/null || true
-          
-          # Samsung Security
-          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' .config 2>/dev/null || true
-          sed -i 's/CONFIG_SECURITY_SELINUX=y/CONFIG_SECURITY_SELINUX=n/g' .config 2>/dev/null || true
-          sed -i 's/CONFIG_SAMSUNG_PRODUCT_SHIP=y/CONFIG_SAMSUNG_PRODUCT_SHIP=n/g' .config 2>/dev/null || true
-
-      - name: Defconfig + SuSFS Config
-        run: |
-          cd kernel-source
-          make ARCH=arm64 LLVM=1 gki_defconfig
-          make ARCH=arm64 LLVM=1 sm8750_defconfig 2>/dev/null || true
-          
-          cat >> .config << EOF
-          CONFIG_SUSFS=y
-          CONFIG_SUSFS_SUS_SU=y
-          CONFIG_SUSFS_SUS_PATH=y
-          CONFIG_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU=y
-          CONFIG_DEBUG_FS=y
-          CONFIG_MODULES=y
-          CONFIG_MODULE_FORCE_LOAD=y
-          CONFIG_CFI_CLANG=n
-          CONFIG_SECURITY_DEFEX=n
-          CONFIG_SECURITY_SELINUX=n
-          CONFIG_BPF_JIT=n
+          Features:
           EOF
 
-      - name: Build Kernel
-        run: |
-          cd kernel-source
-          make ARCH=arm64 CC=clang LD=ld.lld LLVM=1 -j$(nproc) Image.gz dtbs || echo "Build failed, but continuing for artifacts"
+          if [ "${{ inputs.ksun }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> KernelSU-Next v3.2.0
+            EOF
+          fi
 
-      - name: Create AnyKernel3 ZIP
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git ../AnyKernel3
-          cd ../AnyKernel3
-          cp ../kernel-source/arch/arm64/boot/Image.gz . 2>/dev/null || true
-          mkdir -p dtb/exynos
-          cp ../kernel-source/arch/arm64/boot/dts/exynos/*.dtb dtb/exynos/ 2>/dev/null || true
-          zip -r9 ../S25U-SuSFS-6.6.98.zip * -x README.md .git* || true
+          if [ "${{ inputs.susfs }}" = "true" ]; then
+              cat <<'EOF' >> release_body.md
+            -> SUSFS ඞ v2.1.0
+            -> SUSFS Inline hooks
+            EOF
+          fi
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+          if [ "${{ inputs.bbg }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> BBG: https://github.com/vc-teahouse/Baseband-guard
+            EOF
+          fi
+
+          if [ "${{ inputs.unicodefix }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> unicode fix
+            EOF
+          fi
+
+          if [ "${{ inputs.zeromount }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> Zeromount https://github.com/Enginex0/zeromount
+            EOF
+          fi
+
+          if [ "${{ inputs.droidspace }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> droidspaces support https://github.com/ravindu644/Droidspaces-OSS
+            EOF
+          fi
+
+          if [ "${{ inputs.ntsync }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> ntsync
+            EOF
+          fi
+
+          if [ "${{ inputs.bbr }}" = "true" ]; then
+            cat <<'EOF' >> release_body.md
+            -> bbrv1
+            EOF
+          fi
+
+          cat <<'EOF' >> release_body.md
+          Notes:
+          - The only modifications to Samsung Kernels at this time are KSUN and SUSFS. Everything else is left at default settings.
+          - Currently no support for KernelPatch-Next/KPM for the time being.
+          
+          Module: 
+          -> https://github.com/sidex15/ksu_module_susfs
+      
+          Manager:
+          -> KSUN: https://github.com/KernelSU-Next/KernelSU-Next
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: S25U-SuSFS-6.6.98
-          path: |
-            kernel-source/arch/arm64/boot/Image.gz
-            S25U-SuSFS-6.6.98.zip
-            kernel-source/arch/arm64/boot/dts/**/*.dtb
+          tag_name: ${{ env.NEW_TAG }}
+          prerelease: ${{ inputs.release_type == 'Pre-Release' }}
+          files: ""
+          name: ${{ env.RELEASE_NAME }}
+          body_path: release_body.md
 
-      - name: Clean
-        if: always()
-        run: ccache -c
+      - name: Upload Release Assets
+        run: |
+          shopt -s nullglob
+          anykernel_dirs=(./downloaded-artifacts/*/)
+          if [ ${#anykernel_dirs[@]} -eq 0 ]; then
+            echo "No artifact directories found under ./downloaded-artifacts; skipping upload."
+          else
+            for dir in "${anykernel_dirs[@]}"; do
+              # Check if this is an AnyKernel3 artifact directory
+              if [[ "$(basename "$dir")" == *"-AnyKernel3" ]]; then
+                artifact_name=$(basename "$dir")
+                echo "Creating ZIP for $artifact_name..."
+                # Navigate into the directory and zip its contents directly
+                cd "$dir"
+                zip -r -9 "../../${artifact_name}.zip" ./*
+                cd - > /dev/null
+                echo "Uploading ${artifact_name}.zip..."
+                gh release upload ${{ env.NEW_TAG }} "${artifact_name}.zip"
+              fi
+            done
+          fi
+            
+#      - name: Send Telegram Notification
+#        if: inputs.release_type != 'Actions'
+#        run: |
+#          RELEASE_TYPE_TEXT=""
+#          if [ "${{ inputs.release_type }}" == "Pre-Release" ]; then
+#            RELEASE_TYPE_TEXT="🧪 *Pre-Release*"
+#          else
+#            RELEASE_TYPE_TEXT="🚀 *Release*"
+#          fi
+#          
+#          curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+#            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+#            -F message_thread_id="${{ secrets.TELEGRAM_TOPIC_ID_GKI }}" \
+#            -F text="
+#            🌽 *New Kernel $RELEASE_TYPE_TEXT Uploaded*  
+#            📦 *Repository:* [${{ github.repository }}](https://github.com/${{ github.repository }})  
+#            ✏️ *Commit:* [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
+#            [🔗 View GitHub Release](https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }})" \
+#            -F parse_mode="Markdown"
